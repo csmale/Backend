@@ -10,7 +10,7 @@ router.get('/near/:lat/:lon', async (req, res, next) => {
     const lon = parseFloat(lonstring);
     if (!latstring || latstring == '' || isNaN(lat) || !lonstring || lonstring == '' || isNaN(lon) || lat < 40 || lat > 60 || lon < -10 || lon > 10) {
         console.log(`missing location, got (${latstring},${lonstring})`);
-        res.status(501).send('missing or improper location');
+        res.status(400).send('missing or improper location');
         return;
     }
     const dist = 5000;
@@ -41,6 +41,10 @@ router.get('/search', async (req, res, next) => {
 /* GET dests listing. */
 router.get('/:id', async (req, res, next) => {
     const id = req.params.id;
+    if(id.length != 36) {
+        res.status(400).send('Malformed ID');
+        return;
+    }
     const result = await db.getDestById(id);
     console.log(`getDestById returns ${JSON.stringify(result)}`);
     if (result == null) {

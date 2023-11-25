@@ -64,10 +64,14 @@ async function getUserById(id) {
 
 async function checkCredentials(user, password) {
   console.log(`checking credentials for user ${user}`);
-  let res = await getSingle('SELECT * FROM users WHERE userid = $1', [user]);
-  if (!res || password == '') {
+  let lowerUser = user.toLowerCase();
+  let res = await getSingle('SELECT *, (pwhash = crypt($2, pwhash)) AS password_match FROM users WHERE username = $1', [lowerUser, password]);
+  // console.log(`check: ${JSON.stringify(res)}`);
+  if (!res || !res.password_match) {
     return { error: 'Incorrect user name or password' };
   }
+  delete res.pwhash;
+  delete res.password_match;
   return res;
 }
 
@@ -83,6 +87,38 @@ async function getNearbyDests(lat, lon, dist) {
   return res;
 }
 
+async function getPostcodeLocation(postcode) {
+  var pc = postcode.toUpperCase().replace(' ', '');
+  var lon = 0.0;
+  var lat = 0.0;
+
+  var pcregexp = /^([A-Z]{1,2}\d[A-Z\d]?) ?(\d[A-Z]{2})$/
+  var pcregexp2 = /^([A-Z]{1,2}\d[A-Z\d]?)$/
+  var matches = pc.match(pcregexp);
+  if (matches && matches.length == 3) {
+    pc = `${matches[1]} ${matches[2]}`;
+  } else {
+    matches = pc.match(pcregexp2);
+    if (matches && matches.length == 2) {
+      pc = matches[1];
+    } else {
+      console.log(`postcode looks malformed: ${postcode}`);
+      return null;
+    }
+  }
+  console.log(`getting location for postcode ${pc}`);
+  let res = await getSingle(`SELECT latitude, longitude FROM postcodes WHERE postcode = $1`, [pc]);
+  if (res) {
+    lon = res.longitude;
+    lat = res.latitude;
+  } else {
+    console.log(`no postcode data for ${pc}`);
+    return null;
+  }
+  console.log(`postcode ${postcode} location (${lat}, ${lon})`);
+  return { lon: lon, lat: lat }
+}
+
 async function searchDests(opts) {
   console.log(`destinations for ${JSON.stringify(opts)}`);
   /*
@@ -94,6 +130,7 @@ async function searchDests(opts) {
    *  each field is used as a pattern in a LIKE clause
   */
   var distcol = '';
+
   var awhere = [];
   if (opts.company) {
     if (opts.company.length < 3) {
@@ -117,9 +154,16 @@ async function searchDests(opts) {
     if (opts.postcode.length < 3) {
       return { error: "Postcode must have at least 3 characters" };
     }
-    awhere.push(`postcode ILIKE '${opts.postcode}%'`);
+    var pcdata = await getPostcodeLocation(opts.postcode);
+    if (pcdata) {
+      opts.lat = pcdata.lat;
+      opts.lon = pcdata.lon;
+      // will force the distance-based selection below
+    } else {
+      awhere.push(`postcode ILIKE '${opts.postcode}%'`);
+    }
   }
-  if (awhere.length == 0) {
+  if (awhere.length == 0 && !opts.lat && !opts.lon) {
     return { error: "No criteria specified" };
   }
 
@@ -133,7 +177,7 @@ async function searchDests(opts) {
       dist = 5000.0;
     }
     if (isNaN(lat) || isNaN(lon) || isNaN(dist)) {
-      return { error: "Search location not properly specified" };
+      return { error: "Search location or distance not properly specified" };
     }
     awhere.push(`ST_DWithin(loc, ST_SetSRID(ST_MakePoint(${lon}, ${lat}),4326), ${dist})`);
   }
