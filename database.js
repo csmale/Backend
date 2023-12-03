@@ -315,7 +315,11 @@ async function doActivate(id, x) {
 // where userid=params.userid
 // and verification_nonce=params.verification_nonce
 // and (now()-validation_sent) < 48h
-  let res = await getSingle(`UPDATE users SET email_verified=TRUE, validation_sent=NULL, verification_nonce=NULL WHERE id=$1 AND verification_nonce=$2`, [id, x]);
+  let res = await getSingle(`UPDATE users SET email_validated=TRUE, validation_sent=NULL, validation_nonce=NULL WHERE id=$1 AND validation_nonce=$2 RETURNING *`, [id, x]);
+  if(!res) {
+    return {error: 'Unable to activate account. Perhaps it is already active?'};
+  }
+  if(res.pwhash) delete res.pwhash;
   return res;
 }
 

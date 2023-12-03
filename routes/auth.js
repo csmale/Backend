@@ -2,7 +2,8 @@ var express = require('express');
 var router = express.Router();
 
 const db = require('../database');
-const email = require('../email');
+const email = require('../email.js');
+const ejs = require('ejs');
 
 /*
  * GET on /auth/activate
@@ -19,14 +20,16 @@ router.get('/activate', async (req, res, next) => {
         res.status(400).send('Malformed request');
         return;
     }
-    result = db.doActivate(id, x);
+    result = await db.doActivate(id, x);
+    console.log(`doActivate returned ${JSON.stringify(result)}`);
     if (result.error) {
         res.status(400).json(result);
         return;
     }
 
     email.sendWelcome(result);
-    res.status(200).send();
+    const html = await ejs.renderFile('./email/accountactivated.htm', result);
+    res.status(200).send(html);
 });
 
 module.exports = router;

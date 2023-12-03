@@ -1,5 +1,6 @@
 "use strict";
 const nodemailer = require("nodemailer");
+const ejs = require('ejs');
 
 const transporter = nodemailer.createTransport({
     host: process.env.SMTPHOST,
@@ -19,8 +20,8 @@ const confirmURL = "https://gm.colinsmale.eu/auth/confirm";
 async function doSend(mail) {
     // send mail with defined transport object
     try {
+        console.log(`Sending mail from (${mail.from}) to (${mail.to})`);
         const info = await transporter.sendMail(mail);
-
         console.log(`Message to ${mail.to} sent: ${info.messageId}`);
     } catch (e) {
         console.log(`Unable to send message to ${mail.to}: ${JSON.stringify(e)}`);
@@ -35,30 +36,32 @@ async function doSend(mail) {
 }
 
 async function sendActivate(user) {
+    const html = await ejs.renderFile('./email/activateaccount.htm', user);
     const mail = {
-        from: '"GateMaster" <colin.smale@xs4all.nl>', // sender address
+        from: process.env.MAILFROM, // sender address
         to: user.email,
         subject: "Activate your GateMaster account",
-        text: "Hello world?", // plain text body
-        html: "<b>Hello world?</b>", // html body
+        text: "Activate your GateMaster account", // plain text body
+        html: html, // html body
     }
     return doSend(mail);
 }
 
 async function sendWelcome(user) {
+    const html = await ejs.renderFile('./email/accountactivated.htm', user);
     const mail = {
-        from: '"GateMaster" <colin.smale@xs4all.nl>', // sender address
+        from: process.env.MAILFROM, // sender address
         to: user.email,
         subject: "Welcome to GateMaster", // Subject line
-        text: "Hello world?", // plain text body
-        html: "<b>Hello world?</b>", // html body
+        text: "Welcome to GateMaster", // plain text body
+        html: html, // html body
     }
     return doSend(mail);
 }
 
 async function sendChangeEmail(user) {
     const mail = {
-        from: '"GateMaster" <colin.smale@xs4all.nl>', // sender address
+        from: process.env.MAILFROM, // sender address
         to: user.email,
         subject: "Change to your GateMaster password", // Subject line
         text: "Hello world?", // plain text body

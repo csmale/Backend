@@ -69,6 +69,7 @@ router.post('/register', async (req, res, next) => {
     return;
   }
   if(!req.body.userid) req.body.userid = req.body.email;
+  if(!req.body.displayname) req.body.displayname = req.body.email;
 
   const result = await db.doRegister(req.body);
   if (result.error) {
