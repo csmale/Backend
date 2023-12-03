@@ -291,10 +291,11 @@ async function doRegister(params) {
   if(!utils.isValidEmail(params.email)) {
     return { error: 'Improperly formed email'};
   }
-  let res = await getSingle(`
-INSERT INTO users (username, displayname, email, company) VALUES ($1, $2, $3, $4)
-RETURNING *`
-  , [params.username, params.displayname, params.email, params.company]);
+  if(!params.userid || params.userid == '') {
+    return { error: 'Missing User ID'};
+  }
+  let res = await getSingle(`INSERT INTO users (userid, username, displayname, email, company) VALUES ($1, $2, $3, $4, $5) RETURNING *`, [params.userid, params.username, params.displayname, params.email, params.company]);
+  console.log(`insert returns ${JSON.stringify(res)}`);
   return res;
 }
 
@@ -308,13 +309,13 @@ async function doResend(params) {
 // check account email_validated=false
 // check validation_sent has not expired (2 days?)
 // update validation_sent=null, email_validated=true
-async function doActivate(params) {
-  console.log(`attempting to activate account (${params.userid})`);
+async function doActivate(id, x) {
+  console.log(`attempting to activate account (${id})`);
 // update users set email_verified=true, validation_sent=null, verification_nonce=null
 // where userid=params.userid
 // and verification_nonce=params.verification_nonce
 // and (now()-validation_sent) < 48h
-  let res = await getSingle(``);
+  let res = await getSingle(`UPDATE users SET email_verified=TRUE, validation_sent=NULL, verification_nonce=NULL WHERE id=$1 AND verification_nonce=$2`, [id, x]);
   return res;
 }
 
