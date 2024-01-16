@@ -12,15 +12,7 @@ const pool = new Pool({
   port: 5432,
 })
 
-/*
-db.one('SELECT $1 AS value', 123)
-  .then((data) => {
-    console.log('DATA:', data.value)
-  })
-  .catch((error) => {
-    console.log('ERROR:', error)
-  })
-*/
+const MAX_PW_ATTEMPTS = 3;
 
 const { randomUUID } = require('crypto'); // Added in: node v14.17.0
 
@@ -30,16 +22,37 @@ function newID() {
   return randomUUID();
 }
 
+async function txnStart() {
+  var client = await pool.connect();
+  client.query('BEGIN');
+  return client;
+}
+
+async function txnCommit(client) {
+  await client.query('COMMIT');
+  client.release();
+}
+
+async function txnRollback(client) {
+  await client.query('ROLLBACK');
+  client.release();
+}
+
 /**
  * Perform a database operation that will return a single row
  * @param {string} q SQL query
  * @param {string[]} params Parameters to be inserted in the query
  * @returns {object} The row is returned as an object
  */
-async function getSingle(q, params) {
+async function getSingle(q, params, client) {
   var res;
+
   try {
-    res = await pool.query(q, params);
+    if (client) {
+      res = await client.query(q, params);
+    } else {
+      res = await pool.query(q, params);
+    }
   } catch (error) {
     console.log(`Error from DB: ${error}`);
     console.log(`Query: ${q}`);
@@ -56,10 +69,14 @@ async function getSingle(q, params) {
  * @param {string[]} params Parameters to be inserted in the query
  * @returns {object[]} Each row is returned as an object
  */
-async function getMulti(q, params) {
+async function getMulti(q, params, client) {
   var res;
   try {
-    res = await pool.query(q, params);
+    if (client) {
+      res = await client.query(q.params);
+    } else {
+      res = await pool.query(q, params);
+    }
   } catch (error) {
     console.log(`Error from DB: ${error}`);
     console.log(`Query: ${q}`);
@@ -88,14 +105,73 @@ async function getUserByEmail(email) {
  */
 async function checkCredentials(user, password) {
   console.log(`checking credentials for user ${user}`);
+  const client = await txnStart();
+
   let lowerUser = user.toLowerCase();
-  let res = await getSingle('SELECT *, (pwhash = crypt($2, pwhash)) AS password_match FROM users WHERE username = $1', [lowerUser, password]);
+  let res = await getSingle('SELECT *, (pwhash = crypt($2, pwhash)) AS password_match FROM users WHERE username = $1', [lowerUser, password], client);
   // console.log(`check: ${JSON.stringify(res)}`);
   if (!res || !res.password_match) {
+    let res2 = await getSingle('UPDATE users SET bad_pw_count=bad_pw_count+1, is_locked=(is_locked OR bad_pw_count>$2) WHERE username = $1 RETURNING bad_pw_count, is_locked', [lowerUser, MAX_PW_ATTEMPTS], client);
+    if (res2) {
+      console.log(`user ${lowerUser} ${res2.bad_pw_count} attempts, account is ${res2.is_locked ? 'LOCKED' : 'NOT LOCKED'}`);
+    }
+    txnCommit(client);
     return { error: 'Incorrect user name or password' };
+  } else {
+    if (res.is_locked) {
+      txnCommit(client);
+      return { error: 'Account is locked' };
+    }
+    let res2 = await getSingle('UPDATE users SET bad_pw_count=0 WHERE username = $1 RETURNING *', [lowerUser], client);
+    res.bad_pw_count = 0;
   }
-  delete res.pwhash;
-  delete res.password_match;
+  if (res.pwhash) delete res.pwhash;
+  if (res.password_match) delete res.password_match;
+  txnCommit(client);
+  return res;
+}
+
+async function createSession(user_id, device) {
+  console.log(`creating session for user ${user_id} on device ${device}`);
+  const session_id = utils.generate_key();
+
+  let res = await getSingle('INSERT INTO sessions (session_id, user_id, device, created, lastuse) VALUES ($1, $2, $3, NOW(), NOW()) RETURNING session_id', [session_id, user_id, device]);
+  return res;
+}
+
+/**
+ * Resume session by ID
+ * @param {string} session_id Session ID
+ * @param {string} device Device identifier
+ * @returns 
+ */
+async function resumeSession(session_id, device) {
+  console.log(`resuming session ${session_id}`);
+
+  const client = await txnStart();
+
+  let res = await getSingle('UPDATE sessions SET lastuse=NOW() WHERE session_id = $1 AND device = $2 RETURNING user_id', [session_id, device], client);
+  if (res) {
+    res = await getSingle('SELECT * FROM users WHERE id = $1', [res.user_id], client);
+    if (res?.pwhash) delete res.pwhash;
+    if (res?.password_match) delete res.password_match;
+    txnCommit(client);
+  } else {
+    txnRollback(client);
+  }
+  return res;
+}
+
+/**
+ * Delete session by ID: log off user
+ * @param {string} session_id Session ID
+ * @param {string} device Device identifier
+ * @returns 
+ */
+async function deleteSession(session_id, device) {
+  console.log(`deleting session ${session_id} on device ${device}`);
+  let res = await getSingle('DELETE FROM sessions WHERE session_id = $1 AND device = $2 RETURNING user_id', [session_id, device]);
+  console.log(`delete session returned ${JSON.stringify(res)}`);
   return res;
 }
 
@@ -107,8 +183,11 @@ async function checkCredentials(user, password) {
 async function updateUserById(params) {
   console.log(`updating profile for user ${params.userid}`);
   let lowerUser = params.id.toLowerCase();
-  let current = await getSingle('SELECT * FROM users WHERE id=$1', [lowerUser]);
-  if(!current) {
+  const client = await txnStart();
+
+  let current = await getSingle('SELECT * FROM users WHERE id=$1 FOR UPDATE', [lowerUser], client);
+  if (!current) {
+    txnRollback(client);
     return { error: 'Unable to get user profile;' };
   }
   console.log(`current profile: ${JSON.stringify(current)}`);
@@ -117,42 +196,64 @@ async function updateUserById(params) {
   let company = params.company;
   let email = params.email;
   // if email is not changing, don't trigger the email change process
-  if(current.email == email) {
+  if (current.email == email) {
     email = '';
-  } else if(!utils.isValidEmail(email)) {
+  } else if (!utils.isValidEmail(email)) {
+    txnRollback(client);
     return { error: `Improperly formed email ${email}` };
   }
   let displayname = params.displayname;
   let distance_units = params.distance_units;
-  if(!(['km', 'mi'].includes(distance_units))) {
-    return { error: 'Bad value for distance units'};
+  if (!(['km', 'mi'].includes(distance_units))) {
+    txnRollback(client);
+    return { error: 'Bad value for distance units' };
   }
 
   // UPDATE users SET company=$2, email=$3, displayname=$4, distance_units=$5 WHERE id = $1
-  let res = await getSingle('UPDATE users SET company=$2, new_email=$3, displayname=$4, distance_units=$5 WHERE id = $1 RETURNING *', [lowerUser, company, email, displayname, distance_units]);
+  let res = await getSingle('UPDATE users SET company=$2, new_email=$3, displayname=$4, distance_units=$5 WHERE id = $1 RETURNING *', [lowerUser, company, email, displayname, distance_units], client);
   // console.log(`check: ${JSON.stringify(res)}`);
   if (!res) {
+    txnRollback(client);
     return { error: 'Unable to update profile' };
   }
+  txnCommit(client);
   delete res.pwhash;
   delete res.password_match;
   return res;
 };
 
 /**
- * Change a user's password
- * @param {string} user The user name
+ * Change a user's password and unlock the account
+ * @param {string} id The user id
  * @param {string} oldpassword The current password
  * @param {string} newpassword The new password
  * @returns User profile if succesful, otherwise an error object
  */
-async function changePassword(user, oldpassword, newpassword) {
-  console.log(`changing password for user ${user}`);
-  let lowerUser = user.toLowerCase();
-  let res = await getSingle("UPDATE users SET pwhash=crypt($3, gen_salt('md5') WHERE pwhash = crypt($2, pwhash) AND username = $1 RETURNING *", [lowerUser, oldpassword, newpassword]);
+async function changePassword(id, oldpassword, newpassword) {
+  console.log(`changing password for user ${id}`);
+  let lowerUser = id.toLowerCase();
+  let res = await getSingle("UPDATE users SET is_locked=FALSE, bad_pw_count=0, pwhash=crypt($3, gen_salt('md5')) WHERE pwhash = crypt($2, pwhash) AND id = $1 RETURNING *", [lowerUser, oldpassword, newpassword]);
   // console.log(`check: ${JSON.stringify(res)}`);
   if (!res) {
     return { error: 'Incorrect user name or password' };
+  }
+  delete res.pwhash;
+  return res;
+}
+
+/**
+ * Change a user's password and unlock the account
+ * @param {string} id The user id
+ * @param {string} newpassword The new password
+ * @returns User profile if succesful, otherwise an error object
+ */
+async function setPassword(id, newpassword) {
+  console.log(`setting password for user ${id}`);
+  let lowerUser = id.toLowerCase();
+  let res = await getSingle("UPDATE users SET is_locked=FALSE, bad_pw_count=0, pwhash=crypt($3, gen_salt('md5') WHERE id = $1 RETURNING *", [lowerUser, newpassword]);
+  // console.log(`check: ${JSON.stringify(res)}`);
+  if (!res) {
+    return { error: 'Unable to set password' };
   }
   delete res.pwhash;
   return res;
@@ -285,14 +386,14 @@ async function searchDests(opts) {
  */
 async function doRegister(params) {
   console.log(`registering (${params.email},${params.displayname})`);
-  if(params.email == '') {
-    return { error: 'Email address is required'};
+  if (params.email == '') {
+    return { error: 'Email address is required' };
   }
-  if(!utils.isValidEmail(params.email)) {
-    return { error: 'Improperly formed email'};
+  if (!utils.isValidEmail(params.email)) {
+    return { error: 'Improperly formed email' };
   }
-  if(!params.userid || params.userid == '') {
-    return { error: 'Missing User ID'};
+  if (!params.userid || params.userid == '') {
+    return { error: 'Missing User ID' };
   }
   let res = await getSingle(`INSERT INTO users (userid, username, displayname, email, company) VALUES ($1, $2, $3, $4, $5) RETURNING *`, [params.userid, params.username, params.displayname, params.email, params.company]);
   console.log(`insert returns ${JSON.stringify(res)}`);
@@ -302,7 +403,7 @@ async function doRegister(params) {
 async function doResend(params) {
   console.log(`recording resend for (${params.email})`);
   // update users set verification_sent=now, where userid=params.userid and email_verified=false
-  let res = await getMulti(`SELECT *, ST_Y(loc::geometry) AS lat, ST_X(loc::geometry) AS lon, ST_Distance(loc, ST_SetSRID(ST_MakePoint(${lon}, ${lat}),4326)) AS dist FROM dests WHERE ST_DWithin(loc, ST_SetSRID(ST_MakePoint(${lon}, ${lat}),4326), ${dist}) ORDER BY dist LIMIT 20`);
+  let res = await getSingle(`UPDATE users SET email_validated=DEFAULT, validation_sent=DEFAULT, validation_nonce=DEFAULT WHERE id=$1 RETURNING *`, [id]);
   return res;
 }
 
@@ -311,17 +412,165 @@ async function doResend(params) {
 // update validation_sent=null, email_validated=true
 async function doActivate(id, x) {
   console.log(`attempting to activate account (${id})`);
-// update users set email_verified=true, validation_sent=null, verification_nonce=null
-// where userid=params.userid
-// and verification_nonce=params.verification_nonce
-// and (now()-validation_sent) < 48h
+  // update users set email_verified=true, validation_sent=null, verification_nonce=null
+  // where userid=params.userid
+  // and verification_nonce=params.verification_nonce
+  // and (now()-validation_sent) < 48h
   let res = await getSingle(`UPDATE users SET email_validated=TRUE, validation_sent=NULL, validation_nonce=NULL WHERE id=$1 AND validation_nonce=$2 RETURNING *`, [id, x]);
-  if(!res) {
-    return {error: 'Unable to activate account. Perhaps it is already active?'};
+  if (!res) {
+    return { error: 'Unable to activate account. Perhaps it is already active?' };
   }
-  if(res.pwhash) delete res.pwhash;
+  if (res.pwhash) delete res.pwhash;
   return res;
 }
 
-module.exports = { newID, getUserById, getUserByEmail, checkCredentials, getDestById, getNearbyDests, searchDests, doActivate, doRegister, doResend,
-updateUserById };
+/**
+ * add new destination, including optional photo
+ * @param {Object} dest 
+ * 
+ * company
+ * site
+ * unit
+ * postcode
+ * userid
+ * image
+ *  data
+ *  description
+ *  caption
+ *  latitude
+ *  longitude
+ * 
+ */
+async function doAddDest(dest, image) {
+  console.log(`add destination: ${JSON.stringify(dest)}`);
+  if (image) {
+    console.log(`image: ${JSON.stringify(image)}`);
+  }
+  const client = await txnStart();
+  var image_id;
+
+  if (image) {
+    var res = getSingle(`INSERT INTO images (data, uploaded_by, uploaded_on, description, caption, latitude, longitude, location)
+    VALUES ($1, $2, NOW(), $3, $4, $5, $6, ST_SetSRID(ST_MakePoint($5, $6), 4326))
+    RETURNING id`,
+      [image.data, dest.userid, image.description, image.caption, image.lon, image.lat], client);
+    if (!res) {
+      txnRollback(client);
+      return { error: 'Unable to store new image' };
+    }
+    if (res.error) {
+      txnRollback(client);
+      return res;
+    }
+    image_id = res.id;
+  }
+
+  res = getSingle(`INSERT INTO dests (company, postcode, unit, site, loc, notes)
+  VALUES ($1, $2, $3, $4, ST_SetSRID(ST_MakePoint($5, $6), 4326), $7)
+  RETURNING *`, [dest.company, dest.postcode, dest.unit, dest.site, dest.lon, dest.lat, dest.notes], client);
+  if (!res) {
+    txnRollback(client);
+    return { error: 'Unable to store new destination' };
+  }
+  if (res.error) {
+    txnRollback(client);
+    return res;
+  }
+
+  if (image) {
+    var link = getSingle(`INSERT INTO destimages(image_id, dest_id, role)
+  VALUES ($1, $2, $3)
+  RETURNING *`, [image_id, res.id, image.role], client);
+    if (!link) {
+      txnRollback(client);
+      return { error: 'Unable to link image to new destination' };
+    }
+    if (link.error) {
+      txnRollback(client);
+      return link;
+    }
+  }
+  txnCommit(client);
+  return res;
+  // need to put all this in a transaction
+
+}
+
+/**
+ * add new destination, including optional photo
+ * @param {Object} dest 
+ * 
+ * company
+ * site
+ * unit
+ * postcode
+ * notes
+ * userid
+ * image
+ *  data
+ *  description
+ *  caption
+ *  latitude
+ *  longitude
+ * 
+ */
+async function doUpdateDest(dest, image) {
+  console.log(`update destination: ${JSON.stringify(dest)}`);
+  if (image) {
+    console.log(`image: ${JSON.stringify(image)}`);
+  }
+  const client = await txnStart();
+  var image_id;
+/*
+  if (image) {
+    var res = getSingle(`INSERT INTO images (data, uploaded_by, uploaded_on, description, caption, latitude, longitude, location)
+    VALUES ($1, $2, NOW(), $3, $4, $5, $6, ST_SetSRID(ST_MakePoint($5, $6), 4326))
+    RETURNING id`,
+      [image.data, dest.userid, image.description, image.caption, image.longitude, image.latitude], client);
+    if (!res) {
+      txnRollback(client);
+      return { error: 'Unable to store new image' };
+    }
+    if (res.error) {
+      txnRollback(client);
+      return res;
+    }
+    image_id = res.id;
+  }
+*/
+
+  res = getSingle(`UPDATE dests SET company=$1, postcode=$2, unit=$3, site=$4, loc=ST_SetSRID(ST_MakePoint($5, $6), 4326), notes=$7
+  WHERE id=$8
+  RETURNING *`, [dest.company, dest.postcode, dest.unit, dest.site, dest.lon, dest.lat, dest.notes, dest.id], client);
+  if (!res) {
+    txnRollback(client);
+    return { error: 'Unable to update destination' };
+  }
+  if (res.error) {
+    txnRollback(client);
+    return res;
+  }
+
+/*
+  if (image) {
+    var link = getSingle(`INSERT INTO destimages(image_id, dest_id, role)
+  VALUES ($1, $2, $3)
+  RETURNING *`, [image_id, res.id, image.role], client);
+    if (!link) {
+      txnRollback(client);
+      return { error: 'Unable to link image to new destination' };
+    }
+    if (link.error) {
+      txnRollback(client);
+      return link;
+    }
+  }
+*/
+  txnCommit(client);
+  return res;
+}
+
+module.exports = {
+  newID, getUserById, getUserByEmail, checkCredentials, createSession, resumeSession, deleteSession, getDestById, getNearbyDests, searchDests, doActivate, doRegister, doResend,
+  updateUserById, changePassword, setPassword, doAddDest, doUpdateDest
+};

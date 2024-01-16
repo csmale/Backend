@@ -1,3 +1,5 @@
+var crypto = require('crypto');
+
 function isValidEmail(email) {
     return String(email)
     .toLowerCase()
@@ -6,4 +8,14 @@ function isValidEmail(email) {
     );
 };
 
-module.exports = {isValidEmail};
+/**
+ * 
+ * @returns {string} 
+ */
+var generate_key = function() {
+    // 16 bytes is likely to be more than enough,
+    // but you may tweak it to your needs
+    return crypto.randomBytes(16).toString('base64');
+};
+
+module.exports = {isValidEmail, generate_key};

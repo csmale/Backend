@@ -82,9 +82,9 @@ router.post('/register', async (req, res, next) => {
 });
 
 /*
- * POST on /users/resend
+ * GET on /users/resend
  */
-router.post('/resend', async (req, res, next) => {
+router.get('/resend', async (req, res, next) => {
   /*
    * resend validation email
    * check account email_validated=false
@@ -92,14 +92,32 @@ router.post('/resend', async (req, res, next) => {
    * send email
    */
 
-  var result = db.doResend(email);
+  const id=req.query.id;
+  var result = db.doResend(id);
   if (result.error) {
     res.status(400).json(result);
     return;
   }
 
   sendmail.sendActivate(result);
-  res.status(200).send();
+  const html=ejs.renderFile('../email/linkresent.htm', result);
+  res.status(200).send(html);
 })
+
+/* POST users listing. */
+router.post('/:id/password', async (req, res, next) => {
+  const id = req.params.id;
+  const newpw = req.body.newpassword;
+  const oldpw = req.body.oldpassword;
+  const result = oldpw? (await db.changePassword(id, oldpw, newpw)) : (await db.setPassword(id, newpw));
+
+  console.log(`set/change password returns ${JSON.stringify(result)}`);
+  if (result == null) {
+    res.status(404).send('User not found');
+    return;
+  }
+  res.set('Cache-Control', 'no-store');
+  res.status(200).json(result);
+});
 
 module.exports = router;

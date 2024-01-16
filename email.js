@@ -59,6 +59,18 @@ async function sendWelcome(user) {
     return doSend(mail);
 }
 
+async function sendLinkResent(user) {
+    const html = await ejs.renderFile('./email/linkresent.htm', user);
+    const mail = {
+        from: process.env.MAILFROM, // sender address
+        to: user.email,
+        subject: "GateMaster", // Subject line
+        text: "GateMaster", // plain text body
+        html: html, // html body
+    }
+    return doSend(mail);
+}
+
 async function sendChangeEmail(user) {
     const mail = {
         from: process.env.MAILFROM, // sender address
@@ -70,4 +82,4 @@ async function sendChangeEmail(user) {
     return doSend(mail);
 }
 
-module.exports = { sendActivate, sendWelcome, sendChangeEmail };
+module.exports = { sendActivate, sendWelcome, sendLinkResent, sendChangeEmail };

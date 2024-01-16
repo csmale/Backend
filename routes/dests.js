@@ -55,4 +55,104 @@ router.get('/:id', async (req, res, next) => {
     res.status(200).json(result);
 });
 
+/* POST on /dests to add a new destination */
+router.post('/', async(req, res, next) => {
+    res.set('Cache-Control', 'no-store');
+
+    const dest = req.body;
+
+    if(dest.company == '' || dest.company.length < 3) {
+        res.status(400).send({error: 'No company name'});
+        return;
+    }
+    if(dest.postcode == '') {
+        res.status(400).send({error: 'No postcode'});
+        return;
+    }
+    if(dest.site == '') {
+        res.status(400).send({error: 'No site'});
+        return;
+    }
+    if(dest.unit == '') {
+        res.status(400).send({error: 'No unit'});
+        return;
+    }
+    var pc = dest.postcode.toUpperCase().replace(' ', '');
+    var pcregexp = /^([A-Z]{1,2}\d[A-Z\d]?) ?(\d[A-Z]{2})$/;
+    var pcregexp2 = /^([A-Z]{1,2}\d[A-Z\d]?)$/;
+    var matches = pc.match(pcregexp);
+    if (matches && matches.length == 3) {
+      pc = `${matches[1]} ${matches[2]}`;
+    } else {
+      matches = pc.match(pcregexp2);
+      if (matches && matches.length == 2) {
+        pc = matches[1];
+      } else {
+        dest.postcode = pc;
+        return null;
+      }
+    }
+  
+    const result = await db.doAddDest(dest);
+    if(!result) {
+        res.status(400).send({error: 'Error storing destination'});
+    }
+    if (result.error) {
+      res.status(400).json(result);
+      return;
+    }
+    res.status(201).json(result);
+});
+
+/* PUT on /dests to update (rewrite) destination */
+router.put('/:id', async(req, res, next) => {
+    res.set('Cache-Control', 'no-store');
+
+    const dest = req.body;
+    dest.id = req.params.id;
+    console.log(`updating dest: ${JSON.stringify(dest)}`);
+
+    if(dest.company == '' || dest.company.length < 3) {
+        res.status(400).send({error: 'No company name'});
+        return;
+    }
+    if(dest.postcode == '') {
+        res.status(400).send({error: 'No postcode'});
+        return;
+    }
+    if(dest.site == '') {
+        res.status(400).send({error: 'No site'});
+        return;
+    }
+    if(dest.unit == '') {
+        res.status(400).send({error: 'No unit'});
+        return;
+    }
+    var pc = dest.postcode.toUpperCase().replace(' ', '');
+    var pcregexp = /^([A-Z]{1,2}\d[A-Z\d]?) ?(\d[A-Z]{2})$/;
+    var pcregexp2 = /^([A-Z]{1,2}\d[A-Z\d]?)$/;
+    var matches = pc.match(pcregexp);
+    if (matches && matches.length == 3) {
+      pc = `${matches[1]} ${matches[2]}`;
+    } else {
+      matches = pc.match(pcregexp2);
+      if (matches && matches.length == 2) {
+        pc = matches[1];
+      } else {
+        dest.postcode = pc;
+        return null;
+      }
+    }
+  
+    const result = await db.doUpdateDest(dest);
+    if(!result) {
+        res.status(400).send({error: 'Error updating destination'});
+    }
+    if (result.error) {
+      res.status(400).json(result);
+      return;
+    }
+    res.status(200).json(result);
+});
+
 module.exports = router;
